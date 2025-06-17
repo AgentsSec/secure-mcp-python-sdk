@@ -34,6 +34,7 @@ from mcp.server.auth.provider import OAuthAuthorizationServerProvider
 from mcp.server.auth.settings import (
     AuthSettings,
 )
+from mcp.server.elicitation import ElicitationResult, ElicitSchemaModelT, elicit_with_validation
 from mcp.server.fastmcp.exceptions import ResourceError
 from mcp.server.fastmcp.prompts import Prompt, PromptManager
 from mcp.server.fastmcp.resources import FunctionResource, Resource, ResourceManager
@@ -236,6 +237,7 @@ class FastMCP:
         return [
             MCPTool(
                 name=info.name,
+                title=info.title,
                 description=info.description,
                 inputSchema=info.parameters,
                 annotations=info.annotations,
@@ -269,6 +271,7 @@ class FastMCP:
             MCPResource(
                 uri=resource.uri,
                 name=resource.name or "",
+                title=resource.title,
                 description=resource.description,
                 mimeType=resource.mime_type,
             )
@@ -281,6 +284,7 @@ class FastMCP:
             MCPResourceTemplate(
                 uriTemplate=template.uri_template,
                 name=template.name,
+                title=template.title,
                 description=template.description,
             )
             for template in templates
@@ -304,6 +308,7 @@ class FastMCP:
         self,
         fn: AnyFunction,
         name: str | None = None,
+        title: str | None = None,
         description: str | None = None,
         annotations: ToolAnnotations | None = None,
     ) -> None:
@@ -315,14 +320,16 @@ class FastMCP:
         Args:
             fn: The function to register as a tool
             name: Optional name for the tool (defaults to function name)
+            title: Optional human-readable title for the tool
             description: Optional description of what the tool does
             annotations: Optional ToolAnnotations providing additional tool information
         """
-        self._tool_manager.add_tool(fn, name=name, description=description, annotations=annotations)
+        self._tool_manager.add_tool(fn, name=name, title=title, description=description, annotations=annotations)
 
     def tool(
         self,
         name: str | None = None,
+        title: str | None = None,
         description: str | None = None,
         annotations: ToolAnnotations | None = None,
     ) -> Callable[[AnyFunction], AnyFunction]:
@@ -334,6 +341,7 @@ class FastMCP:
 
         Args:
             name: Optional name for the tool (defaults to function name)
+            title: Optional human-readable title for the tool
             description: Optional description of what the tool does
             annotations: Optional ToolAnnotations providing additional tool information
 
@@ -359,10 +367,28 @@ class FastMCP:
             )
 
         def decorator(fn: AnyFunction) -> AnyFunction:
-            self.add_tool(fn, name=name, description=description, annotations=annotations)
+            self.add_tool(fn, name=name, title=title, description=description, annotations=annotations)
             return fn
 
         return decorator
+
+    def completion(self):
+        """Decorator to register a completion handler.
+
+        The completion handler receives:
+        - ref: PromptReference or ResourceTemplateReference
+        - argument: CompletionArgument with name and partial value
+        - context: Optional CompletionContext with previously resolved arguments
+
+        Example:
+            @mcp.completion()
+            async def handle_completion(ref, argument, context):
+                if isinstance(ref, ResourceTemplateReference):
+                    # Return completions based on ref, argument, and context
+                    return Completion(values=["option1", "option2"])
+                return None
+        """
+        return self._mcp_server.completion()
 
     def add_resource(self, resource: Resource) -> None:
         """Add a resource to the server.
@@ -377,6 +403,7 @@ class FastMCP:
         uri: str,
         *,
         name: str | None = None,
+        title: str | None = None,
         description: str | None = None,
         mime_type: str | None = None,
     ) -> Callable[[AnyFunction], AnyFunction]:
@@ -394,6 +421,7 @@ class FastMCP:
         Args:
             uri: URI for the resource (e.g. "resource://my-resource" or "resource://{param}")
             name: Optional name for the resource
+            title: Optional human-readable title for the resource
             description: Optional description of the resource
             mime_type: Optional MIME type for the resource
 
@@ -443,6 +471,7 @@ class FastMCP:
                     fn=fn,
                     uri_template=uri,
                     name=name,
+                    title=title,
                     description=description,
                     mime_type=mime_type,
                 )
@@ -452,6 +481,7 @@ class FastMCP:
                     fn=fn,
                     uri=uri,
                     name=name,
+                    title=title,
                     description=description,
                     mime_type=mime_type,
                 )
@@ -468,11 +498,14 @@ class FastMCP:
         """
         self._prompt_manager.add_prompt(prompt)
 
-    def prompt(self, name: str | None = None, description: str | None = None) -> Callable[[AnyFunction], AnyFunction]:
+    def prompt(
+        self, name: str | None = None, title: str | None = None, description: str | None = None
+    ) -> Callable[[AnyFunction], AnyFunction]:
         """Decorator to register a prompt.
 
         Args:
             name: Optional name for the prompt (defaults to function name)
+            title: Optional human-readable title for the prompt
             description: Optional description of what the prompt does
 
         Example:
@@ -510,7 +543,7 @@ class FastMCP:
             )
 
         def decorator(func: AnyFunction) -> AnyFunction:
-            prompt = Prompt.from_function(func, name=name, description=description)
+            prompt = Prompt.from_function(func, name=name, title=title, description=description)
             self.add_prompt(prompt)
             return func
 
@@ -812,6 +845,7 @@ class FastMCP:
         return [
             MCPPrompt(
                 name=prompt.name,
+                title=prompt.title,
                 description=prompt.description,
                 arguments=[
                     MCPPromptArgument(
@@ -953,6 +987,37 @@ class Context(BaseModel, Generic[ServerSessionT, LifespanContextT, RequestT]):
         """
         assert self._fastmcp is not None, "Context is not available outside of a request"
         return await self._fastmcp.read_resource(uri)
+
+    async def elicit(
+        self,
+        message: str,
+        schema: type[ElicitSchemaModelT],
+    ) -> ElicitationResult[ElicitSchemaModelT]:
+        """Elicit information from the client/user.
+
+        This method can be used to interactively ask for additional information from the
+        client within a tool's execution. The client might display the message to the
+        user and collect a response according to the provided schema. Or in case a
+        client is an agent, it might decide how to handle the elicitation -- either by asking
+        the user or automatically generating a response.
+
+        Args:
+            schema: A Pydantic model class defining the expected response structure, according to the specification,
+                    only primive types are allowed.
+            message: Optional message to present to the user. If not provided, will use
+                    a default message based on the schema
+
+        Returns:
+            An ElicitationResult containing the action taken and the data if accepted
+
+        Note:
+            Check the result.action to determine if the user accepted, declined, or cancelled.
+            The result.data will only be populated if action is "accept" and validation succeeded.
+        """
+
+        return await elicit_with_validation(
+            session=self.request_context.session, message=message, schema=schema, related_request_id=self.request_id
+        )
 
     async def log(
         self,
