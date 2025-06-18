@@ -23,6 +23,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.resources import FunctionResource
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.context import RequestContext
 from mcp.types import (
     Completion,
@@ -37,6 +38,7 @@ from mcp.types import (
     ProgressNotification,
     PromptReference,
     ReadResourceResult,
+    ResourceLink,
     ResourceListChangedNotification,
     ResourceTemplateReference,
     SamplingMessage,
@@ -92,7 +94,10 @@ def stateless_http_server_url(stateless_http_server_port: int) -> str:
 # Create a function to make the FastMCP server app
 def make_fastmcp_app():
     """Create a FastMCP server without auth settings."""
-    mcp = FastMCP(name="NoAuthServer")
+    transport_security = TransportSecuritySettings(
+        allowed_hosts=["127.0.0.1:*", "localhost:*"], allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]
+    )
+    mcp = FastMCP(name="NoAuthServer", transport_security=transport_security)
 
     # Add a simple tool
     @mcp.tool(description="A simple echo tool")
@@ -121,9 +126,10 @@ def make_fastmcp_app():
 
 def make_everything_fastmcp() -> FastMCP:
     """Create a FastMCP server with all features enabled for testing."""
-    from mcp.server.fastmcp import Context
-
-    mcp = FastMCP(name="EverythingServer")
+    transport_security = TransportSecuritySettings(
+        allowed_hosts=["127.0.0.1:*", "localhost:*"], allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]
+    )
+    mcp = FastMCP(name="EverythingServer", transport_security=transport_security)
 
     # Tool with context for logging and progress
     @mcp.tool(description="A tool that demonstrates logging and progress", title="Progress Tool")
@@ -146,6 +152,25 @@ def make_everything_fastmcp() -> FastMCP:
     @mcp.tool(description="A simple echo tool", title="Echo Tool")
     def echo(message: str) -> str:
         return f"Echo: {message}"
+
+    # Tool that returns ResourceLinks
+    @mcp.tool(description="Lists files and returns resource links", title="List Files Tool")
+    def list_files() -> list[ResourceLink]:
+        """Returns a list of resource links for files matching the pattern."""
+
+        # Mock some file resources for testing
+        file_resources = [
+            {
+                "type": "resource_link",
+                "uri": "file:///project/README.md",
+                "name": "README.md",
+                "mimeType": "text/markdown",
+            }
+        ]
+
+        result: list[ResourceLink] = [ResourceLink.model_validate(file_json) for file_json in file_resources]
+
+        return result
 
     # Tool with sampling capability
     @mcp.tool(description="A tool that uses sampling to generate content", title="Sampling Tool")
@@ -333,8 +358,10 @@ def make_everything_fastmcp_app():
 
 def make_fastmcp_streamable_http_app():
     """Create a FastMCP server with StreamableHTTP transport."""
-
-    mcp = FastMCP(name="NoAuthServer")
+    transport_security = TransportSecuritySettings(
+        allowed_hosts=["127.0.0.1:*", "localhost:*"], allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]
+    )
+    mcp = FastMCP(name="NoAuthServer", transport_security=transport_security)
 
     # Add a simple tool
     @mcp.tool(description="A simple echo tool")
@@ -359,8 +386,10 @@ def make_everything_fastmcp_streamable_http_app():
 
 def make_fastmcp_stateless_http_app():
     """Create a FastMCP server with stateless StreamableHTTP transport."""
-
-    mcp = FastMCP(name="StatelessServer", stateless_http=True)
+    transport_security = TransportSecuritySettings(
+        allowed_hosts=["127.0.0.1:*", "localhost:*"], allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]
+    )
+    mcp = FastMCP(name="StatelessServer", stateless_http=True, transport_security=transport_security)
 
     # Add a simple tool
     @mcp.tool(description="A simple echo tool")
@@ -753,7 +782,17 @@ async def call_all_mcp_features(session: ClientSession, collector: NotificationC
     assert isinstance(tool_result.content[0], TextContent)
     assert tool_result.content[0].text == "Echo: hello"
 
-    # 2. Tool with context (logging and progress)
+    # 2. Test tool that returns ResourceLinks
+    list_files_result = await session.call_tool("list_files")
+    assert len(list_files_result.content) == 1
+
+    # Rest should be ResourceLinks
+    content = list_files_result.content[0]
+    assert isinstance(content, ResourceLink)
+    assert str(content.uri).startswith("file:///")
+    assert content.name is not None
+    assert content.mimeType is not None
+
     # Test progress callback functionality
     progress_updates = []
 
