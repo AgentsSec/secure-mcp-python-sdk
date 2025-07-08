@@ -104,7 +104,12 @@ async def test_stateful_session_cleanup_on_graceful_exit(running_manager):
     async def mock_send(message):
         sent_messages.append(message)
 
-    scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": []}
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [(b"content-type", b"application/json")],
+    }
 
     async def mock_receive():
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -158,21 +163,18 @@ async def test_stateful_session_cleanup_on_exception(running_manager):
         if message["type"] == "http.response.start" and message["status"] >= 500:
             pass  # Expected if TestException propagates that far up the transport
 
-    scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": []}
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [(b"content-type", b"application/json")],
+    }
 
     async def mock_receive():
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    # It's possible handle_request itself might raise an error if the TestException
-    # isn't caught by the transport layer before propagating.
-    # The key is that the session manager's internal task for MCPServer.run
-    # encounters the exception.
-    try:
-        await manager.handle_request(scope, mock_receive, mock_send)
-    except TestException:
-        # This might be caught here if not handled by StreamableHTTPServerTransport's
-        # error handling
-        pass
+    # Trigger session creation
+    await manager.handle_request(scope, mock_receive, mock_send)
 
     session_id = None
     for msg in sent_messages:
